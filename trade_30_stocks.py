@@ -275,14 +275,26 @@ def backtest(data: pd.DataFrame, initial_cash: float, max_positions: int) -> tup
         if buy_candidates:
             slots_available = max(max_positions - len(positions), 0)
             selected_candidates = buy_candidates[:slots_available]
-            allocation = cash / len(selected_candidates) if selected_candidates else 0.0
 
-            for row in selected_candidates:
+            # Prefer equal per-position allocation based on initial cash
+            per_position_budget = float(initial_cash) / float(max_positions) if max_positions > 0 else float(initial_cash)
+            m = len(selected_candidates)
+            if m == 0:
+                allocations: list[float] = []
+            else:
+                total_needed = per_position_budget * m
+                if cash >= total_needed:
+                    allocations = [per_position_budget] * m
+                else:
+                    # not enough cash to fully fund per_position_budget for all; split remaining cash equally
+                    allocations = [cash / m] * m
+
+            for row, alloc in zip(selected_candidates, allocations):
                 symbol = str(row.Symbol)
                 buy_price = float(row.Open) if pd.notna(row.Open) else float(row.Close)
-                if buy_price <= 0:
+                if buy_price <= 0 or alloc <= 0:
                     continue
-                quantity = int(allocation // buy_price)
+                quantity = int(alloc // buy_price)
                 if quantity <= 0:
                     continue
                 trade_value = quantity * buy_price
@@ -301,6 +313,8 @@ def backtest(data: pd.DataFrame, initial_cash: float, max_positions: int) -> tup
                         "Quantity": quantity,
                         "Price": buy_price,
                         "TradeValue": trade_value,
+                        "Allocated": alloc,
+                        "RemainingAllocation": alloc - trade_value,
                         "CashAfterTrade": cash,
                         "EntryDate": pd.Timestamp(date),
                         "EntryPrice": buy_price,
@@ -344,7 +358,7 @@ def backtest(data: pd.DataFrame, initial_cash: float, max_positions: int) -> tup
         )
         positions.pop(symbol, None)
 
-    trade_columns = ["Date", "Symbol", "Side", "Quantity", "Price", "TradeValue", "CashAfterTrade", "EntryDate", "EntryPrice"]
+    trade_columns = ["Date", "Symbol", "Side", "Quantity", "Price", "TradeValue", "Allocated", "RemainingAllocation", "CashAfterTrade", "EntryDate", "EntryPrice"]
     trade_df = pd.DataFrame(trade_rows, columns=trade_columns)
     if not trade_df.empty:
         trade_df = trade_df.sort_values(["Date", "Symbol", "Side"]).reset_index(drop=True)
@@ -447,7 +461,7 @@ def build_buy_trades_df(trade_df: pd.DataFrame) -> pd.DataFrame:
             "Price": "BuyPrice",
             "TradeValue": "BuyValue",
         }
-    )[["Date", "Symbol", "Quantity", "BuyPrice", "BuyValue", "CashAfterTrade", "EntryDate"]]
+    )[["Date", "Symbol", "Quantity", "BuyPrice", "BuyValue", "Allocated", "RemainingAllocation", "CashAfterTrade", "EntryDate"]]
 
 
 def build_sell_trades_df(trade_df: pd.DataFrame) -> pd.DataFrame:

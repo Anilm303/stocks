@@ -9,6 +9,10 @@ import pandas as pd
 
 INITIAL_CASH_DEFAULT = 200_000.0
 DEFAULT_SMA_WINDOW = 20
+DEFAULT_RSI_BUY_MIN = 45.0
+DEFAULT_RSI_BUY_MAX = 70.0
+DEFAULT_RSI_SELL_MIN = 35.0
+DEFAULT_RSI_SELL_MAX = 75.0
 
 
 @dataclass
@@ -23,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Backtest a simple trading strategy across up to 30 Nepal stock symbols."
     )
-    parser.add_argument("input", help="Path to the Excel file with historical prices.")
+    parser.add_argument("input", help="Path to a CSV file, Excel file, or folder with historical prices.")
     parser.add_argument(
         "--output",
         default="trading_report.xlsx",
@@ -56,24 +60,43 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_price_data(path: Path, sheet_name: str | None = None) -> pd.DataFrame:
-    workbook = pd.ExcelFile(path)
-
-    if sheet_name is not None:
-        raw_frames = [pd.read_excel(workbook, sheet_name=sheet_name)]
-        sheet_names = [sheet_name]
+    if path.is_dir():
+        frames = load_from_directory(path)
+    elif path.suffix.lower() == ".csv":
+        frames = [standardize_frame(pd.read_csv(path), path.stem)]
     else:
-        sheet_names = workbook.sheet_names
-        raw_frames = [pd.read_excel(workbook, sheet_name=name) for name in sheet_names]
+        workbook = pd.ExcelFile(path)
+        if sheet_name is not None:
+            raw_frames = [pd.read_excel(workbook, sheet_name=sheet_name)]
+            sheet_names = [sheet_name]
+        else:
+            sheet_names = workbook.sheet_names
+            raw_frames = [pd.read_excel(workbook, sheet_name=name) for name in sheet_names]
 
-    frames: list[pd.DataFrame] = []
-    for current_sheet_name, frame in zip(sheet_names, raw_frames):
-        standardized = standardize_frame(frame, current_sheet_name or "Sheet1")
-        frames.append(standardized)
+        frames = [standardize_frame(frame, current_sheet_name or "Sheet1") for current_sheet_name, frame in zip(sheet_names, raw_frames)]
 
     data = pd.concat(frames, ignore_index=True)
     data["Date"] = pd.to_datetime(data["Date"])
     data = data.sort_values(["Date", "Symbol"]).reset_index(drop=True)
     return data
+
+
+def load_from_directory(directory: Path) -> list[pd.DataFrame]:
+    frames: list[pd.DataFrame] = []
+    for file_path in sorted(directory.iterdir()):
+        if file_path.suffix.lower() == ".csv":
+            frames.append(standardize_frame(pd.read_csv(file_path), file_path.stem))
+        elif file_path.suffix.lower() in {".xlsx", ".xlsm", ".xls"}:
+            workbook = pd.ExcelFile(file_path)
+            sheet_frames = [pd.read_excel(workbook, sheet_name=name) for name in workbook.sheet_names]
+            frames.extend(
+                standardize_frame(frame, f"{file_path.stem}_{sheet_name or 'Sheet1'}")
+                for sheet_name, frame in zip(workbook.sheet_names, sheet_frames)
+            )
+
+    if not frames:
+        raise ValueError(f"No CSV or Excel files found in {directory}")
+    return frames
 
 
 def standardize_frame(frame: pd.DataFrame, fallback_symbol: str) -> pd.DataFrame:
@@ -94,31 +117,62 @@ def standardize_frame(frame: pd.DataFrame, fallback_symbol: str) -> pd.DataFrame
     open_column = columns.get("open")
     signal_column = columns.get("signal")
 
-    result = pd.DataFrame(
-        {
-            "Date": frame[columns["date"]],
-            "Symbol": symbol_series,
-            "Open": frame[open_column] if open_column is not None else pd.NA,
-            "Close": frame[close_column],
-        }
-    )
+    result = frame.copy()
+    result = result.rename(columns={columns["date"]: "Date"})
+
+    if "symbol" in columns:
+        result = result.rename(columns={columns["symbol"]: "Symbol"})
+    else:
+        result["Symbol"] = symbol_series
+
+    if open_column is not None:
+        result = result.rename(columns={open_column: "Open"})
+    else:
+        result["Open"] = pd.NA
+
+    result = result.rename(columns={close_column: "Close"})
 
     if signal_column is not None:
-        result["Signal"] = frame[signal_column]
+        result = result.rename(columns={signal_column: "Signal"})
 
     result["Open"] = pd.to_numeric(result["Open"], errors="coerce")
     result["Close"] = pd.to_numeric(result["Close"], errors="coerce")
+    numeric_columns = [
+        "High",
+        "Low",
+        "Volume",
+        "Turnover",
+        "Daily_Return",
+        "Log_Return",
+        "SMA_5",
+        "SMA_20",
+        "EMA_12",
+        "EMA_26",
+        "RSI_14",
+        "MACD",
+        "MACD_Signal",
+        "ATR_14",
+        "BB_Middle",
+        "BB_Std",
+        "BB_Upper",
+        "BB_Lower",
+        "OBV",
+    ]
+    for column in numeric_columns:
+        if column in result.columns:
+            result[column] = pd.to_numeric(result[column], errors="coerce")
+
     result = result.dropna(subset=["Date", "Symbol", "Close"]).copy()
     return result
 
 
 def validate_input_columns(frame: pd.DataFrame) -> None:
-    required_columns = {"date", "symbol", "open", "close", "signal"}
+    required_columns = {"date", "symbol", "close"}
     present_columns = {column.lower().strip() for column in frame.columns}
     missing_columns = required_columns - present_columns
     if missing_columns:
         raise ValueError(
-            "Your sheet should have these columns: Date, Symbol, Open, Close, Signal. Missing: "
+            "Your sheet should have these columns: Date, Symbol, Close. Optional columns: Open, Signal. Missing: "
             + ", ".join(sorted(missing_columns))
         )
 
@@ -144,14 +198,38 @@ def add_strategy_signals(data: pd.DataFrame, sma_window: int) -> pd.DataFrame:
             ).fillna(0).astype(int)
         return data
 
+    indicator_columns = {column.lower().strip() for column in data.columns}
+    has_indicator_set = {"sma_20", "rsi_14", "macd", "macd_signal"}.issubset(indicator_columns)
+
     frames: list[pd.DataFrame] = []
     for symbol, group in data.groupby("Symbol", sort=False):
         ordered = group.sort_values("Date").copy()
-        ordered["SMA"] = ordered["Close"].rolling(window=sma_window, min_periods=sma_window).mean()
-        prev_close = ordered["Close"].shift(1)
-        prev_sma = ordered["SMA"].shift(1)
-        buy_signal = (ordered["Close"] > ordered["SMA"]) & (prev_close <= prev_sma)
-        sell_signal = (ordered["Close"] < ordered["SMA"]) & (prev_close >= prev_sma)
+
+        if has_indicator_set:
+            ordered["SMA20"] = pd.to_numeric(ordered.get("SMA_20"), errors="coerce")
+            ordered["RSI14"] = pd.to_numeric(ordered.get("RSI_14"), errors="coerce")
+            ordered["MACD"] = pd.to_numeric(ordered.get("MACD"), errors="coerce")
+            ordered["MACDSignal"] = pd.to_numeric(ordered.get("MACD_Signal"), errors="coerce")
+
+            prev_close = ordered["Close"].shift(1)
+            prev_sma = ordered["SMA20"].shift(1)
+            prev_macd = ordered["MACD"].shift(1)
+            prev_macd_signal = ordered["MACDSignal"].shift(1)
+
+            bullish_price_cross = (ordered["Close"] > ordered["SMA20"]) & (prev_close <= prev_sma)
+            bullish_macd_cross = (ordered["MACD"] > ordered["MACDSignal"]) & (prev_macd <= prev_macd_signal)
+            buy_signal = bullish_price_cross & bullish_macd_cross & ordered["RSI14"].between(DEFAULT_RSI_BUY_MIN, DEFAULT_RSI_BUY_MAX)
+
+            bearish_price_cross = (ordered["Close"] < ordered["SMA20"]) & (prev_close >= prev_sma)
+            bearish_macd_cross = (ordered["MACD"] < ordered["MACDSignal"]) & (prev_macd >= prev_macd_signal)
+            sell_signal = bearish_price_cross | bearish_macd_cross | (ordered["RSI14"] >= DEFAULT_RSI_SELL_MAX) | (ordered["RSI14"] <= DEFAULT_RSI_SELL_MIN)
+        else:
+            ordered["SMA"] = ordered["Close"].rolling(window=sma_window, min_periods=sma_window).mean()
+            prev_close = ordered["Close"].shift(1)
+            prev_sma = ordered["SMA"].shift(1)
+            buy_signal = (ordered["Close"] > ordered["SMA"]) & (prev_close <= prev_sma)
+            sell_signal = (ordered["Close"] < ordered["SMA"]) & (prev_close >= prev_sma)
+
         ordered["StrategySignal"] = 0
         ordered.loc[buy_signal, "StrategySignal"] = 1
         ordered.loc[sell_signal, "StrategySignal"] = -1
@@ -350,13 +428,66 @@ def compute_summary(equity_df: pd.DataFrame, trade_df: pd.DataFrame, initial_cas
     )
 
 
-def write_report(output_path: Path, summary_df: pd.DataFrame, trade_df: pd.DataFrame, equity_df: pd.DataFrame, holdings_df: pd.DataFrame, data_df: pd.DataFrame) -> None:
+def write_workbook(output_path: Path, sheet_frames: dict[str, pd.DataFrame]) -> None:
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        summary_df.to_excel(writer, index=False, sheet_name="Summary")
-        trade_df.to_excel(writer, index=False, sheet_name="Trades")
-        equity_df.to_excel(writer, index=False, sheet_name="EquityCurve")
-        holdings_df.to_excel(writer, index=False, sheet_name="OpenPositions")
-        data_df.to_excel(writer, index=False, sheet_name="Signals")
+        for sheet_name, frame in sheet_frames.items():
+            frame.to_excel(writer, index=False, sheet_name=sheet_name)
+
+
+def build_buy_trades_df(trade_df: pd.DataFrame) -> pd.DataFrame:
+    if trade_df.empty:
+        return trade_df.copy()
+
+    buy_df = trade_df[trade_df["Side"] == "BUY"].copy()
+    if buy_df.empty:
+        return buy_df
+
+    return buy_df.rename(
+        columns={
+            "Price": "BuyPrice",
+            "TradeValue": "BuyValue",
+        }
+    )[["Date", "Symbol", "Quantity", "BuyPrice", "BuyValue", "CashAfterTrade", "EntryDate"]]
+
+
+def build_sell_trades_df(trade_df: pd.DataFrame) -> pd.DataFrame:
+    if trade_df.empty:
+        return trade_df.copy()
+
+    sell_df = trade_df[trade_df["Side"].isin(["SELL", "FORCED_EXIT"])].copy()
+    if sell_df.empty:
+        return sell_df
+
+    sell_df = sell_df.rename(
+        columns={
+            "Price": "SellPrice",
+            "TradeValue": "SellValue",
+        }
+    )
+    sell_df["PnL"] = sell_df["SellValue"] - (sell_df["Quantity"] * sell_df["EntryPrice"])
+    return sell_df[["Date", "Symbol", "Quantity", "SellPrice", "SellValue", "PnL", "CashAfterTrade", "EntryDate", "EntryPrice"]]
+
+
+def write_report(output_path: Path, summary_df: pd.DataFrame, trade_df: pd.DataFrame, equity_df: pd.DataFrame, holdings_df: pd.DataFrame, data_df: pd.DataFrame) -> None:
+    buy_df = build_buy_trades_df(trade_df)
+    sell_df = build_sell_trades_df(trade_df)
+
+    combined_sheets = {
+        "Summary": summary_df,
+        "BuyTrades": buy_df,
+        "SellTrades": sell_df,
+        "Trades": trade_df,
+        "EquityCurve": equity_df,
+        "OpenPositions": holdings_df,
+        "Signals": data_df,
+    }
+    write_workbook(output_path, combined_sheets)
+
+    buy_report_path = output_path.with_name(f"{output_path.stem}_buy{output_path.suffix}")
+    sell_report_path = output_path.with_name(f"{output_path.stem}_sell{output_path.suffix}")
+
+    write_workbook(buy_report_path, {"BuyTrades": buy_df})
+    write_workbook(sell_report_path, {"SellTrades": sell_df})
 
 
 def main() -> None:
@@ -374,7 +505,9 @@ def main() -> None:
     summary_df = compute_summary(equity_df, trade_df, args.initial_cash, start_date, end_date)
 
     write_report(output_path, summary_df, trade_df, equity_df, holdings_df, data)
-    print(f"Report written to {output_path.resolve()}")
+    print(f"Combined report written to {output_path.resolve()}")
+    print(f"Buy report written to {output_path.with_name(f'{output_path.stem}_buy{output_path.suffix}').resolve()}")
+    print(f"Sell report written to {output_path.with_name(f'{output_path.stem}_sell{output_path.suffix}').resolve()}")
     print(summary_df.to_string(index=False))
 
 

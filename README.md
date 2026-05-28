@@ -1,20 +1,21 @@
 # Nepal's Stocks Backtest
 
-This folder contains a Python backtest template for trading up to 30 stocks from an Excel workbook with 14 years of historical data.
+This folder contains a Python backtest template for trading up to 30 stocks from CSV or Excel data with 14 years of historical data.
 
 ## What it does
 
-- Reads price data from Excel.
-- Uses either a `Signal` column or a default 20-day SMA crossover strategy.
+- Reads price data from a folder of CSV files, a CSV file, or an Excel workbook.
+- Uses either a `Signal` column or a confluence strategy built from `SMA_20`, `RSI_14`, and `MACD` when those indicator columns exist.
 - Starts with Rs. 2,00,000 by default.
-- Writes an Excel report with summary, trades, equity curve, open positions, and the standardized signal data.
+- Writes a combined Excel report plus separate buy-trades and sell-trades Excel files.
 
 ## Expected input
 
-Your Excel file can be either:
+Your input can be either:
 
-- A single sheet with columns like `Date`, `Symbol`, `Open`, `Close`, and optional `Signal`.
-- Multiple sheets, where each sheet is one stock and includes `Date`, `Open`, and `Close`.
+- A folder like `Data/` containing one CSV per stock.
+- A single CSV file.
+- An Excel workbook with one or more sheets.
 
 If `Signal` exists, the script uses it directly:
 
@@ -27,14 +28,30 @@ If `Signal` does not exist, the script creates one using a 20-day simple moving 
 ## Run
 
 ```powershell
-c:/Users/HP/OneDrive/Documents/Desktop/Nepal's stocks/.venv/Scripts/python.exe trade_30_stocks.py data.xlsx --output trading_report.xlsx
+C:/Users/Lenovo/AppData/Local/Programs/Python/Python313/python.exe trade_30_stocks.py Data --output trading_report.xlsx
 ```
 
 ## Example
 
 ```powershell
-c:/Users/HP/OneDrive/Documents/Desktop/Nepal's stocks/.venv/Scripts/python.exe trade_30_stocks.py data.xlsx --sheet Prices --initial-cash 200000 --max-positions 30
+C:/Users/Lenovo/AppData/Local/Programs/Python/Python313/python.exe trade_30_stocks.py Data --initial-cash 200000 --max-positions 30
 ```
+
+## Output Files
+
+- `trading_report.xlsx` - combined report with all sheets
+- `trading_report_buy.xlsx` - buy trades workbook with only `BuyTrades`
+- `trading_report_sell.xlsx` - sell trades workbook with only `SellTrades`
+
+## Combined Report Sheets
+
+- `Summary`
+- `BuyTrades`
+- `SellTrades`
+- `Trades`
+- `EquityCurve`
+- `OpenPositions`
+- `Signals`
 
 ## Notes
 

@@ -362,9 +362,20 @@ def backtest(data: pd.DataFrame, initial_cash: float, max_positions: int) -> tup
     trade_df = pd.DataFrame(trade_rows, columns=trade_columns)
     if not trade_df.empty:
         trade_df = trade_df.sort_values(["Date", "Symbol", "Side"]).reset_index(drop=True)
+        # Format Date and EntryDate to date-only strings (remove trailing 00:00:00 time)
+        for col in ("Date", "EntryDate"):
+            if col in trade_df.columns:
+                trade_df[col] = pd.to_datetime(trade_df[col]).dt.strftime("%Y-%m-%d")
+        # Drop exact duplicate trade rows (same Date, Symbol, Side, Quantity, Price, TradeValue)
+        dup_subset = [c for c in ("Date", "Symbol", "Side", "Quantity", "Price", "TradeValue") if c in trade_df.columns]
+        if dup_subset:
+            trade_df = trade_df.drop_duplicates(subset=dup_subset, keep="first").reset_index(drop=True)
     equity_df = pd.DataFrame(equity_rows)
     if not equity_df.empty:
         equity_df = equity_df.sort_values("Date").reset_index(drop=True)
+        # Format equity Date to date-only string
+        if "Date" in equity_df.columns:
+            equity_df["Date"] = pd.to_datetime(equity_df["Date"]).dt.strftime("%Y-%m-%d")
     holdings_df = pd.DataFrame(
         [
             {
@@ -376,7 +387,9 @@ def backtest(data: pd.DataFrame, initial_cash: float, max_positions: int) -> tup
             for position in positions.values()
         ]
     )
-
+    # Format holdings EntryDate to date-only string
+    if not holdings_df.empty and "EntryDate" in holdings_df.columns:
+        holdings_df["EntryDate"] = pd.to_datetime(holdings_df["EntryDate"]).dt.strftime("%Y-%m-%d")
     if not positions:
         equity_df = pd.concat(
             [
@@ -485,6 +498,23 @@ def build_sell_trades_df(trade_df: pd.DataFrame) -> pd.DataFrame:
 def write_report(output_path: Path, summary_df: pd.DataFrame, trade_df: pd.DataFrame, equity_df: pd.DataFrame, holdings_df: pd.DataFrame, data_df: pd.DataFrame) -> None:
     buy_df = build_buy_trades_df(trade_df)
     sell_df = build_sell_trades_df(trade_df)
+
+    # Ensure Date and EntryDate columns are formatted as date-only strings across all sheets
+    def _format_dates(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        df = df.copy()
+        for col in ("Date", "EntryDate"):
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col]).dt.strftime("%Y-%m-%d")
+        return df
+
+    buy_df = _format_dates(buy_df)
+    sell_df = _format_dates(sell_df)
+    trade_df = _format_dates(trade_df)
+    equity_df = _format_dates(equity_df)
+    holdings_df = _format_dates(holdings_df)
+    data_df = _format_dates(data_df)
 
     combined_sheets = {
         "Summary": summary_df,

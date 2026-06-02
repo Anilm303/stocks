@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 
 INITIAL_CASH_DEFAULT = 200_000.0
@@ -55,6 +57,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=30,
         help="Maximum number of open positions to hold at once.",
+    )
+    parser.add_argument(
+        "--export-trades",
+        action="store_true",
+        help="Also export the trades dataframe to trades.csv for analysis.",
     )
     return parser.parse_args()
 
@@ -447,10 +454,7 @@ def compute_summary(equity_df: pd.DataFrame, trade_df: pd.DataFrame, initial_cas
             {"Metric": "Initial Cash", "Value": initial_cash},
             {"Metric": "Final Equity", "Value": final_equity},
             {"Metric": "Total Return", "Value": total_return},
-            {"Metric": "CAGR", "Value": cagr},
-            {"Metric": "Max Drawdown", "Value": max_drawdown},
             {"Metric": "Total Trades", "Value": len(trade_df)},
-            {"Metric": "Win Rate", "Value": win_rate},
         ]
     )
 
@@ -459,6 +463,19 @@ def write_workbook(output_path: Path, sheet_frames: dict[str, pd.DataFrame]) -> 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         for sheet_name, frame in sheet_frames.items():
             frame.to_excel(writer, index=False, sheet_name=sheet_name)
+
+    workbook = load_workbook(output_path)
+    decimal_columns = {"Allocated", "RemainingAllocation"}
+    number_format = "0.00"
+
+    for worksheet in workbook.worksheets:
+        header_map = {cell.value: cell.column for cell in worksheet[1] if cell.value in decimal_columns}
+        for column_index in header_map.values():
+            column_letter = get_column_letter(column_index)
+            for row_index in range(2, worksheet.max_row + 1):
+                worksheet[f"{column_letter}{row_index}"].number_format = number_format
+
+    workbook.save(output_path)
 
 
 def build_buy_trades_df(trade_df: pd.DataFrame) -> pd.DataFrame:
@@ -529,9 +546,19 @@ def write_report(output_path: Path, summary_df: pd.DataFrame, trade_df: pd.DataF
 
     buy_report_path = output_path.with_name(f"{output_path.stem}_buy{output_path.suffix}")
     sell_report_path = output_path.with_name(f"{output_path.stem}_sell{output_path.suffix}")
+    buy_sell_report_path = output_path.with_name(f"{output_path.stem}_buy_sell{output_path.suffix}")
+    combined_trades_df = pd.concat(
+        [
+            buy_df.assign(Side="BUY"),
+            sell_df.assign(Side="SELL"),
+        ],
+        ignore_index=True,
+        sort=False,
+    )
 
     write_workbook(buy_report_path, {"BuyTrades": buy_df})
     write_workbook(sell_report_path, {"SellTrades": sell_df})
+    write_workbook(buy_sell_report_path, {"Trades": combined_trades_df})
 
 
 def main() -> None:
@@ -549,6 +576,8 @@ def main() -> None:
     summary_df = compute_summary(equity_df, trade_df, args.initial_cash, start_date, end_date)
 
     write_report(output_path, summary_df, trade_df, equity_df, holdings_df, data)
+    if args.export_trades:
+        trade_df.to_csv("trades.csv", index=False)
     print(f"Combined report written to {output_path.resolve()}")
     print(f"Buy report written to {output_path.with_name(f'{output_path.stem}_buy{output_path.suffix}').resolve()}")
     print(f"Sell report written to {output_path.with_name(f'{output_path.stem}_sell{output_path.suffix}').resolve()}")

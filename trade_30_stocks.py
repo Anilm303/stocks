@@ -83,7 +83,7 @@ def load_price_data(path: Path, sheet_name: str | None = None) -> pd.DataFrame:
         frames = [standardize_frame(frame, current_sheet_name or "Sheet1") for current_sheet_name, frame in zip(sheet_names, raw_frames)]
 
     data = pd.concat(frames, ignore_index=True)
-    data["Date"] = pd.to_datetime(data["Date"])
+    data["Date"] = pd.to_datetime(data["Date"], format='mixed')
     data = data.sort_values(["Date", "Symbol"]).reset_index(drop=True)
     return data
 
@@ -372,7 +372,7 @@ def backtest(data: pd.DataFrame, initial_cash: float, max_positions: int) -> tup
         # Format Date and EntryDate to date-only strings (remove trailing 00:00:00 time)
         for col in ("Date", "EntryDate"):
             if col in trade_df.columns:
-                trade_df[col] = pd.to_datetime(trade_df[col]).dt.strftime("%Y-%m-%d")
+                trade_df[col] = pd.to_datetime(trade_df[col], format='mixed').dt.strftime("%Y-%m-%d")
         # Drop exact duplicate trade rows (same Date, Symbol, Side, Quantity, Price, TradeValue)
         dup_subset = [c for c in ("Date", "Symbol", "Side", "Quantity", "Price", "TradeValue") if c in trade_df.columns]
         if dup_subset:
@@ -382,7 +382,7 @@ def backtest(data: pd.DataFrame, initial_cash: float, max_positions: int) -> tup
         equity_df = equity_df.sort_values("Date").reset_index(drop=True)
         # Format equity Date to date-only string
         if "Date" in equity_df.columns:
-            equity_df["Date"] = pd.to_datetime(equity_df["Date"]).dt.strftime("%Y-%m-%d")
+            equity_df["Date"] = pd.to_datetime(equity_df["Date"], format='mixed').dt.strftime("%Y-%m-%d")
     holdings_df = pd.DataFrame(
         [
             {
@@ -396,7 +396,7 @@ def backtest(data: pd.DataFrame, initial_cash: float, max_positions: int) -> tup
     )
     # Format holdings EntryDate to date-only string
     if not holdings_df.empty and "EntryDate" in holdings_df.columns:
-        holdings_df["EntryDate"] = pd.to_datetime(holdings_df["EntryDate"]).dt.strftime("%Y-%m-%d")
+        holdings_df["EntryDate"] = pd.to_datetime(holdings_df["EntryDate"], format='mixed').dt.strftime("%Y-%m-%d")
     if not positions:
         equity_df = pd.concat(
             [
@@ -523,7 +523,7 @@ def write_report(output_path: Path, summary_df: pd.DataFrame, trade_df: pd.DataF
         df = df.copy()
         for col in ("Date", "EntryDate"):
             if col in df.columns:
-                df[col] = pd.to_datetime(df[col]).dt.strftime("%Y-%m-%d")
+                df[col] = pd.to_datetime(df[col], format='mixed').dt.strftime("%Y-%m-%d")
         return df
 
     buy_df = _format_dates(buy_df)

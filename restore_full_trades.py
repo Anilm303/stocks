@@ -91,7 +91,7 @@ for idx, row in trades_df.iterrows():
 df_all = pd.DataFrame(new_trades)
 
 df_buy = df_all[df_all['Side'] == 'BUY'].copy()
-df_buy = df_buy[['Date', 'Symbol', 'Quantity', 'BuyPrice', 'BuyValue', 'Allocated', 'RemainingAllocation', 'CashAfterTrade', 'EntryDate', 'EntryPrice']]
+df_buy = df_buy[['Date', 'Symbol', 'Quantity', 'BuyPrice', 'BuyValue', 'Allocated', 'RemainingAllocation', 'CashAfterTrade']]
 
 df_sell = df_all[df_all['Side'] == 'SELL'].copy()
 df_sell = df_sell[['Date', 'Symbol', 'Quantity', 'SellPrice', 'SellValue', 'PnL', 'CashAfterTrade', 'EntryDate', 'EntryPrice']]
@@ -148,5 +148,29 @@ with pd.ExcelWriter(sell_out, engine="openpyxl") as writer:
 wb = load_workbook(sell_out)
 style_ws(wb.active)
 wb.save(sell_out)
+
+# Create combined trades sheet
+df_buy_comb = df_buy.rename(columns={"BuyPrice": "Price", "BuyValue": "TradeValue"}).copy()
+df_buy_comb["Side"] = "BUY"
+df_buy_comb["EntryDate"] = df_buy_comb["Date"]
+df_buy_comb["EntryPrice"] = df_buy_comb["Price"]
+df_buy_comb["PnL"] = pd.NA
+
+df_sell_comb = df_sell.rename(columns={"SellPrice": "Price", "SellValue": "TradeValue"}).copy()
+df_sell_comb["Side"] = "SELL"
+df_sell_comb["Allocated"] = pd.NA
+df_sell_comb["RemainingAllocation"] = pd.NA
+
+df_combined = pd.concat([df_buy_comb, df_sell_comb], ignore_index=True)
+df_combined['DateObj'] = pd.to_datetime(df_combined['Date'])
+df_combined = df_combined.sort_values(by=["DateObj", "Symbol"]).drop(columns=['DateObj']).reset_index(drop=True)
+df_combined = df_combined[['Date', 'Symbol', 'Side', 'Quantity', 'Price', 'TradeValue', 'Allocated', 'RemainingAllocation', 'PnL', 'CashAfterTrade', 'EntryDate', 'EntryPrice']]
+
+combined_out = "projection_1.5m_trades_combined.xlsx"
+with pd.ExcelWriter(combined_out, engine="openpyxl") as writer:
+    df_combined.to_excel(writer, index=False)
+wb = load_workbook(combined_out)
+style_ws(wb.active)
+wb.save(combined_out)
 
 print(f"Restored all {len(trades_df)} trades! Final cash: {current_cash:,.2f}")

@@ -212,34 +212,20 @@ def add_strategy_signals(data: pd.DataFrame, sma_window: int) -> pd.DataFrame:
     for symbol, group in data.groupby("Symbol", sort=False):
         ordered = group.sort_values("Date").copy()
 
+        # Always calculate 3-month (90 days) rolling minimum
+        ordered_date_idx = ordered.set_index("Date")
+        ordered["Min_Close_90D"] = ordered_date_idx["Close"].rolling("90D").min().values
+
         if has_indicator_set:
             ordered["SMA20"] = pd.to_numeric(ordered.get("SMA_20"), errors="coerce")
             ordered["RSI14"] = pd.to_numeric(ordered.get("RSI_14"), errors="coerce")
             ordered["MACD"] = pd.to_numeric(ordered.get("MACD"), errors="coerce")
             ordered["MACDSignal"] = pd.to_numeric(ordered.get("MACD_Signal"), errors="coerce")
 
-            prev_close = ordered["Close"].shift(1)
-            prev_sma = ordered["SMA20"].shift(1)
-            prev_macd = ordered["MACD"].shift(1)
-            prev_macd_signal = ordered["MACDSignal"].shift(1)
-
-            bullish_price_cross = (ordered["Close"] > ordered["SMA20"]) & (prev_close <= prev_sma)
-            bullish_macd_cross = (ordered["MACD"] > ordered["MACDSignal"]) & (prev_macd <= prev_macd_signal)
-            buy_signal = bullish_price_cross & bullish_macd_cross & ordered["RSI14"].between(DEFAULT_RSI_BUY_MIN, DEFAULT_RSI_BUY_MAX)
-
-            bearish_price_cross = (ordered["Close"] < ordered["SMA20"]) & (prev_close >= prev_sma)
-            bearish_macd_cross = (ordered["MACD"] < ordered["MACDSignal"]) & (prev_macd >= prev_macd_signal)
-            sell_signal = bearish_price_cross | bearish_macd_cross | (ordered["RSI14"] >= DEFAULT_RSI_SELL_MAX) | (ordered["RSI14"] <= DEFAULT_RSI_SELL_MIN)
-        else:
-            ordered["SMA"] = ordered["Close"].rolling(window=sma_window, min_periods=sma_window).mean()
-            prev_close = ordered["Close"].shift(1)
-            prev_sma = ordered["SMA"].shift(1)
-            buy_signal = (ordered["Close"] > ordered["SMA"]) & (prev_close <= prev_sma)
-            sell_signal = (ordered["Close"] < ordered["SMA"]) & (prev_close >= prev_sma)
+        buy_signal = ordered["Close"] <= ordered["Min_Close_90D"]
 
         ordered["StrategySignal"] = 0
         ordered.loc[buy_signal, "StrategySignal"] = 1
-        ordered.loc[sell_signal, "StrategySignal"] = -1
         frames.append(ordered)
 
     return pd.concat(frames, ignore_index=True)
@@ -256,27 +242,31 @@ def backtest(data: pd.DataFrame, initial_cash: float, max_positions: int) -> tup
         day_prices = {row.Symbol: float(row.Close) for row in day.itertuples(index=False)}
 
         for row in day.itertuples(index=False):
-            if int(row.StrategySignal) != -1:
-                continue
             symbol = str(row.Symbol)
             if symbol not in positions:
                 continue
-            exit_price = float(row.Open) if pd.notna(row.Open) else float(row.Close)
-            position = positions.pop(symbol)
-            cash += position.quantity * exit_price
-            trade_rows.append(
-                {
-                    "Date": date,
-                    "Symbol": symbol,
-                    "Side": "SELL",
-                    "Quantity": position.quantity,
-                    "Price": exit_price,
-                    "TradeValue": position.quantity * exit_price,
-                    "CashAfterTrade": cash,
-                    "EntryDate": position.entry_date,
-                    "EntryPrice": position.entry_price,
-                }
-            )
+            
+            current_price = float(row.Open) if pd.notna(row.Open) else float(row.Close)
+            position = positions[symbol]
+            
+            # Rule: Sell if current price >= entry_price + 20
+            # Never sell at a loss (guaranteed since 20 > 0)
+            if current_price >= position.entry_price + 20:
+                positions.pop(symbol)
+                cash += position.quantity * current_price
+                trade_rows.append(
+                    {
+                        "Date": date,
+                        "Symbol": symbol,
+                        "Side": "SELL",
+                        "Quantity": position.quantity,
+                        "Price": current_price,
+                        "TradeValue": position.quantity * current_price,
+                        "CashAfterTrade": cash,
+                        "EntryDate": position.entry_date,
+                        "EntryPrice": position.entry_price,
+                    }
+                )
 
         buy_candidates = [row for row in day.itertuples(index=False) if int(row.StrategySignal) == 1 and str(row.Symbol) not in positions]
         if buy_candidates:
@@ -349,21 +339,25 @@ def backtest(data: pd.DataFrame, initial_cash: float, max_positions: int) -> tup
     )
     for symbol, position in list(positions.items()):
         exit_price = float(final_prices.get(symbol, position.entry_price))
-        cash += position.quantity * exit_price
-        trade_rows.append(
-            {
-                "Date": final_date,
-                "Symbol": symbol,
-                "Side": "FORCED_EXIT",
-                "Quantity": position.quantity,
-                "Price": exit_price,
-                "TradeValue": position.quantity * exit_price,
-                "CashAfterTrade": cash,
-                "EntryDate": position.entry_date,
-                "EntryPrice": position.entry_price,
-            }
-        )
-        positions.pop(symbol, None)
+        # Strict no-loss rule: only exit if price >= entry price
+        # Positions still at a loss remain open (shown in OpenPositions sheet, not Trades)
+        if exit_price >= position.entry_price:
+            cash += position.quantity * exit_price
+            trade_rows.append(
+                {
+                    "Date": final_date,
+                    "Symbol": symbol,
+                    "Side": "FORCED_EXIT",
+                    "Quantity": position.quantity,
+                    "Price": exit_price,
+                    "TradeValue": position.quantity * exit_price,
+                    "CashAfterTrade": cash,
+                    "EntryDate": position.entry_date,
+                    "EntryPrice": position.entry_price,
+                }
+            )
+            positions.pop(symbol, None)
+        # else: leave position open - it will appear in OpenPositions sheet
 
     trade_columns = ["Date", "Symbol", "Side", "Quantity", "Price", "TradeValue", "Allocated", "RemainingAllocation", "CashAfterTrade", "EntryDate", "EntryPrice"]
     trade_df = pd.DataFrame(trade_rows, columns=trade_columns)
@@ -390,6 +384,8 @@ def backtest(data: pd.DataFrame, initial_cash: float, max_positions: int) -> tup
                 "Quantity": position.quantity,
                 "EntryDate": position.entry_date,
                 "EntryPrice": position.entry_price,
+                "CurrentPrice": float(final_prices.get(position.symbol, position.entry_price)),
+                "UnrealizedPnL": (float(final_prices.get(position.symbol, position.entry_price)) - position.entry_price) * position.quantity,
             }
             for position in positions.values()
         ]

@@ -32,63 +32,45 @@ signals_df["Date_str"] = pd.to_datetime(signals_df["Date"]).dt.strftime("%Y-%m-%
 signals_df.set_index(["Symbol", "Date_str"], inplace=True)
 print("Signals loaded successfully.")
 
-# 4. Run a pass to find the unadjusted total scaled profit (using base scale map)
+# 3c. Load OpenPositions sheet — stocks held at end that were NOT sold (no-loss rule)
+open_pos_df = pd.read_excel("summary report.xlsx", sheet_name="OpenPositions")
+print(f"Open positions remaining at end of backtest: {len(open_pos_df)}")
+
+# 4. Run a pass to find the unadjusted total scaled equity (cash + open positions)
+# using base scale map to compute the correct multiplier toward Rs 1.5M
 temp_cash = 200000.0
+temp_open_positions = {}  # symbol -> {qty, entry_price}
+
 for idx, row in trades_df.iterrows():
     trade_year = row["Year"]
     scale = base_scale_map[trade_year]
 
-    # Scale quantity and compute trade value
     qty = round(row["Quantity"] * scale)
     price = row["Price"]
     trade_val = qty * price
 
-    # Initialise allocated cash on first iteration
-    if idx == 0:
-        allocated_cash = 0.0
-
-    # Update allocated and remaining cash based on trade side
     if row["Side"] == "BUY":
-        allocated_cash += trade_val
         temp_cash -= trade_val
-    else:  # SELL
-        allocated_cash -= trade_val
+        temp_open_positions[row["Symbol"]] = {"qty": qty, "entry_price": price}
+    else:  # SELL or FORCED_EXIT
         temp_cash += trade_val
+        temp_open_positions.pop(row["Symbol"], None)
 
-    # Store per‑row values for later output
-    trades_df.at[idx, "AllocatedCash"] = allocated_cash
-    trades_df.at[idx, "RemainingCash"] = temp_cash
-    if row['Side'] == 'BUY':
-        allocated_cash += trade_val
-        temp_cash -= trade_val
-    else:  # SELL trades
-        allocated_cash -= trade_val
-        temp_cash += trade_val
-    # Store values for output
-    trades_df.at[idx, 'AllocatedCash'] = allocated_cash
-    trades_df.at[idx, 'RemainingCash'] = temp_cash
+# Add the current market value of open positions (scaled) to temp_cash to get total equity
+unadj_cash_only = temp_cash
+unadj_op_value = 0.0
+for _, op_row in open_pos_df.iterrows():
+    symbol = op_row["Symbol"]
+    current_price = float(op_row["CurrentPrice"]) if "CurrentPrice" in op_row and pd.notna(op_row["CurrentPrice"]) else float(op_row["EntryPrice"])
+    if symbol in temp_open_positions:
+        scaled_qty = temp_open_positions[symbol]["qty"]
+        val = scaled_qty * current_price
+        unadj_op_value += val
+        temp_cash += val  # include unrealized value in equity
 
-# After processing all trades, create a new workbook sheet with allocation info
-allocation_wb = Workbook()
-alloc_ws = allocation_wb.active
-alloc_ws.title = "Allocation"
-# Write header
-alloc_ws.append(["Date", "Symbol", "Side", "Quantity", "Price", "AllocatedCash", "RemainingCash"])
-for _, r in trades_df.iterrows():
-    alloc_ws.append([
-        r['Date'], r['Symbol'], r['Side'], r['Quantity'], r['Price'],
-        r.get('AllocatedCash', None), r.get('RemainingCash', None)
-    ])
-# Save allocation workbook
-alloc_output = "projection_1.5m_allocation.xlsx"
-if os.path.exists(alloc_output):
-    os.remove(alloc_output)
-allocation_wb.save(alloc_output)
-print(f"[OK] Allocation workbook generated: {alloc_output}")
-    
-
-
-unadj_profit = temp_cash - 200000.0
+# temp_cash now represents the total portfolio equity (cash + open positions at market)
+unadj_equity = temp_cash  # total equity before scaling
+unadj_profit = unadj_equity - 200000.0
 multiplier = 1300000.0 / unadj_profit
 
 # Calculate final scale map with the multiplier
@@ -119,40 +101,13 @@ for idx, row in trades_df.iterrows():
     else:
         allocated = pd.NA
         
-    # Determine reason for trade direction based on indicators
-    trade_date_str = row["Date"].strftime("%Y-%m-%d")
-    lookup_key = (row["Symbol"], trade_date_str)
-    
-    if lookup_key in signals_df.index:
-        sig_row = signals_df.loc[lookup_key]
-        if isinstance(sig_row, pd.DataFrame):
-            sig_row = sig_row.iloc[0]
-            
-        rsi = sig_row.get("RSI_14", sig_row.get("RSI14", None))
-        macd = sig_row.get("MACD", None)
-        macd_sig = sig_row.get("MACD_Signal", sig_row.get("MACDSignal", None))
-        close = sig_row.get("Close", None)
-        sma = sig_row.get("SMA_20", sig_row.get("SMA20", None))
-        
-        rsi_val = f"{rsi:.1f}" if pd.notna(rsi) else "N/A"
-        close_val = f"{close:.1f}" if pd.notna(close) else "N/A"
-        sma_val = f"{sma:.1f}" if pd.notna(sma) else "N/A"
-        
-        if row["Side"] == "BUY":
-            reason = f"BUY: Price > SMA-20, MACD Bullish Cross, RSI={rsi_val} (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
-        else:
-            if pd.notna(rsi) and rsi >= 75:
-                reason = f"SELL: RSI Overbought (RSI={rsi_val} >= 75) (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
-            elif pd.notna(rsi) and rsi <= 35:
-                reason = f"SELL: RSI Oversold (RSI={rsi_val} <= 35) (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
-            elif pd.notna(close) and pd.notna(sma) and close < sma:
-                reason = f"SELL: Price below SMA-20 (Close={close_val} < SMA={sma_val}) (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
-            elif pd.notna(macd) and pd.notna(macd_sig) and macd < macd_sig:
-                reason = f"SELL: MACD Bearish Cross (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
-            else:
-                reason = f"SELL: Technical exit signal (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
-    else:
-        reason = f"BUY: Trend following signal (scaled by {scale:.2f}x to fit Rs. 1.5M target)" if row["Side"] == "BUY" else f"SELL: Trend reversal signal (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
+    # Determine reason for trade direction based on the upgraded strategy rules
+    if row["Side"] == "BUY":
+        reason = f"BUY: Stock price is at its 3-month lowest (Rs. {price:.2f}) (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
+    elif row["Side"] == "SELL":
+        reason = f"SELL: Profit target reached (+Rs. 20.00 from buy price of Rs. {entry_price:.2f}) (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
+    else:  # FORCED_EXIT
+        reason = f"SELL: Forced exit at end of backtesting period (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
     
     scaled_trades.append({
         "Date": row["Date"],
@@ -169,14 +124,36 @@ for idx, row in trades_df.iterrows():
     })
 
 # 6. Compute running cash and find discrepancy
+cash = 200000.0
 for trade in scaled_trades:
     if trade["Side"] == "BUY":
         cash -= trade["TradeValue"]
     else:
         cash += trade["TradeValue"]
 
-# 7. Adjust quantities of the last trades to make it exactly 1,500,000.00
-discrepancy = 1500000.0 - cash
+# Calculate open position value at current scaled quantities
+scaled_open_positions = {}
+for trade in scaled_trades:
+    symbol = trade["Symbol"]
+    qty = trade["Quantity"]
+    if trade["Side"] == "BUY":
+        scaled_open_positions[symbol] = scaled_open_positions.get(symbol, 0) + qty
+    else:  # SELL or FORCED_EXIT
+        scaled_open_positions[symbol] = scaled_open_positions.get(symbol, 0) - qty
+
+open_market_value = 0.0
+for symbol, qty in scaled_open_positions.items():
+    if qty > 0:
+        op_match = open_pos_df[open_pos_df["Symbol"] == symbol]
+        if not op_match.empty:
+            current_price = float(op_match.iloc[0].get("CurrentPrice", op_match.iloc[0]["EntryPrice"]))
+        else:
+            current_price = 0.0
+        open_market_value += qty * current_price
+
+# 7. Adjust quantities of the last trades to make total equity exactly 1,500,000.00
+target_cash = 1500000.0 - open_market_value
+discrepancy = target_cash - cash
 
 for i in range(len(scaled_trades) - 1, -1, -1):
     if abs(discrepancy) < 0.01:
@@ -209,7 +186,7 @@ for i in range(len(scaled_trades) - 1, -1, -1):
 # If there's still a small cent discrepancy, adjust the last trade value
 if abs(discrepancy) > 0.01:
     last_trade = scaled_trades[-1]
-    if last_trade["Side"] == "SELL":
+    if last_trade["Side"] in ("SELL", "FORCED_EXIT"):
         last_trade["TradeValue"] = round(last_trade["TradeValue"] + discrepancy, 2)
     else:
         last_trade["TradeValue"] = round(last_trade["TradeValue"] - discrepancy, 2)
@@ -262,6 +239,50 @@ df_combined = df_all.copy()
 df_combined = df_combined.rename(columns={"Price": "Price", "TradeValue": "TradeValue"})
 # Include Reason column in combined sheet
 df_combined = df_combined[['Date', 'Symbol', 'Side', 'Quantity', 'Price', 'TradeValue', 'Allocated', 'RemainingAllocation', 'PnL', 'CashAfterTrade', 'EntryDate', 'EntryPrice', 'Reason']]
+
+# Prepare Scaled Open Positions Sheet (positions held at end, not sold due to no-loss rule)
+open_rows = []
+for symbol, qty in scaled_open_positions.items():
+    if qty > 0:
+        buys = [t for t in new_trades_list if t["Symbol"] == symbol and t["Side"] == "BUY"]
+        if buys:
+            entry_price = buys[-1]["EntryPrice"]
+            entry_date = buys[-1]["EntryDate"]
+        else:
+            entry_price = 0.0
+            entry_date = pd.NaT
+            
+        op_match = open_pos_df[open_pos_df["Symbol"] == symbol]
+        if not op_match.empty:
+            current_price = float(op_match.iloc[0].get("CurrentPrice", op_match.iloc[0]["EntryPrice"]))
+        else:
+            current_price = entry_price
+            
+        market_value = qty * current_price
+        unrealized_pnl = (current_price - entry_price) * qty
+        status = "HELD (No-Loss Rule: Not sold at end)"
+        
+        open_rows.append({
+            "Symbol": symbol,
+            "EntryDate": entry_date,
+            "EntryPrice": entry_price,
+            "CurrentPrice": current_price,
+            "ScaledQuantity": qty,
+            "MarketValue": market_value,
+            "UnrealizedPnL": unrealized_pnl,
+            "Status": status
+        })
+
+df_open = pd.DataFrame(open_rows)
+if not df_open.empty:
+    df_open["EntryDate"] = pd.to_datetime(df_open["EntryDate"]).dt.strftime("%Y-%m-%d")
+    df_open = df_open[['Symbol', 'EntryDate', 'EntryPrice', 'CurrentPrice', 'ScaledQuantity', 'MarketValue', 'UnrealizedPnL', 'Status']]
+else:
+    df_open = pd.DataFrame(columns=['Symbol', 'EntryDate', 'EntryPrice', 'CurrentPrice', 'ScaledQuantity', 'MarketValue', 'UnrealizedPnL', 'Status'])
+
+# Compute final total equity summary
+open_market_value = df_open["MarketValue"].sum() if not df_open.empty else 0.0
+total_final_equity = cash + open_market_value
 
 
 # Styling Function
@@ -330,10 +351,15 @@ print(f"[OK] {sell_out} created")
 
 combined_out = "projection_1.5m_trades_combined.xlsx"
 with pd.ExcelWriter(combined_out, engine="openpyxl") as writer:
-    df_combined.to_excel(writer, index=False)
+    df_combined.to_excel(writer, sheet_name="AllTrades", index=False)
+    df_open.to_excel(writer, sheet_name="OpenPositions", index=False)
 wb = load_workbook(combined_out)
-style_ws(wb.active)
+for sheet_name in wb.sheetnames:
+    style_ws(wb[sheet_name])
 wb.save(combined_out)
 print(f"[OK] {combined_out} created")
 
-print(f"Restored all {len(trades_df)} trades! Final cash: {cash:,.2f}")
+print(f"Restored all {len(trades_df)} trades! Final cash (realized): Rs. {cash:,.2f}")
+print(f"Open positions (scaled, unrealized): Rs. {open_market_value:,.2f}")
+print(f"TOTAL PORTFOLIO EQUITY: Rs. {total_final_equity:,.2f}")
+

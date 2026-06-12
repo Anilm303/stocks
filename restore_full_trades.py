@@ -226,7 +226,7 @@ df_all["EntryDate"] = pd.to_datetime(df_all["EntryDate"]).dt.strftime("%Y-%m-%d"
 df_buy = df_all[df_all["Side"] == "BUY"].copy()
 df_buy = df_buy.rename(columns={"Price": "BuyPrice", "TradeValue": "BuyValue"})
 # Include Reason column in buy sheet
-df_buy = df_buy[['Date', 'Symbol', 'Quantity', 'BuyPrice', 'BuyValue', 'Allocated', 'RemainingAllocation', 'CashAfterTrade', 'Reason']]
+df_buy = df_buy[['Date', 'Symbol', 'Quantity', 'BuyPrice', 'BuyValue', 'CashAfterTrade', 'Reason']]
 
 # Prepare Sell Trades Sheet
 df_sell = df_all[df_all["Side"].isin(["SELL", "FORCED_EXIT"])].copy()
@@ -238,7 +238,7 @@ df_sell = df_sell[['Date', 'Symbol', 'Quantity', 'SellPrice', 'SellValue', 'PnL'
 df_combined = df_all.copy()
 df_combined = df_combined.rename(columns={"Price": "Price", "TradeValue": "TradeValue"})
 # Include Reason column in combined sheet
-df_combined = df_combined[['Date', 'Symbol', 'Side', 'Quantity', 'Price', 'TradeValue', 'Allocated', 'RemainingAllocation', 'PnL', 'CashAfterTrade', 'EntryDate', 'EntryPrice', 'Reason']]
+df_combined = df_combined[['Date', 'Symbol', 'Side', 'Quantity', 'Price', 'TradeValue', 'PnL', 'CashAfterTrade', 'EntryDate', 'EntryPrice', 'Reason']]
 
 # Prepare Scaled Open Positions Sheet (positions held at end, not sold due to no-loss rule)
 open_rows = []

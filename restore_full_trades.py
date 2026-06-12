@@ -9,7 +9,7 @@ targ_df["Year"] = targ_df["Year"].astype(int)
 targ_map = targ_df.set_index("Year")["Value"].to_dict()
 
 # 2. Load original equity curve to find original year-end equity
-orig_eq_df = pd.read_excel("trading_report.xlsx", sheet_name="EquityCurve")
+orig_eq_df = pd.read_excel("summary report.xlsx", sheet_name="EquityCurve")
 orig_eq_df["Year"] = pd.to_datetime(orig_eq_df["Date"]).dt.year
 orig_map = orig_eq_df.groupby("Year")["Equity"].last().to_dict()
 
@@ -18,12 +18,19 @@ base_scale_map = {}
 for y in sorted(orig_map.keys()):
     base_scale_map[y] = targ_map[y] / orig_map[y]
 
-# 3. Load all trades from trading_report.xlsx Trades sheet
-trades_df = pd.read_excel("trading_report.xlsx", sheet_name="Trades")
+# 3. Load all trades from summary report.xlsx Trades sheet
+trades_df = pd.read_excel("summary report.xlsx", sheet_name="Trades")
 trades_df["Date"] = pd.to_datetime(trades_df["Date"])
 # Sort trades stably by date to maintain chronological execution order
 trades_df = trades_df.sort_values(by="Date", kind="mergesort").reset_index(drop=True)
 trades_df["Year"] = trades_df["Date"].dt.year
+
+# 3b. Load signals sheet to look up indicator values for trade reasons
+print("Loading Signals sheet to determine trade reasons...")
+signals_df = pd.read_excel("summary report.xlsx", sheet_name="Signals")
+signals_df["Date_str"] = pd.to_datetime(signals_df["Date"]).dt.strftime("%Y-%m-%d")
+signals_df.set_index(["Symbol", "Date_str"], inplace=True)
+print("Signals loaded successfully.")
 
 # 4. Run a pass to find the unadjusted total scaled profit (using base scale map)
 temp_cash = 200000.0
@@ -79,10 +86,7 @@ if os.path.exists(alloc_output):
 allocation_wb.save(alloc_output)
 print(f"[OK] Allocation workbook generated: {alloc_output}")
     
-    if row["Side"] == "BUY":
-        temp_cash -= trade_val
-    else:
-        temp_cash += trade_val
+
 
 unadj_profit = temp_cash - 200000.0
 multiplier = 1300000.0 / unadj_profit
@@ -115,6 +119,41 @@ for idx, row in trades_df.iterrows():
     else:
         allocated = pd.NA
         
+    # Determine reason for trade direction based on indicators
+    trade_date_str = row["Date"].strftime("%Y-%m-%d")
+    lookup_key = (row["Symbol"], trade_date_str)
+    
+    if lookup_key in signals_df.index:
+        sig_row = signals_df.loc[lookup_key]
+        if isinstance(sig_row, pd.DataFrame):
+            sig_row = sig_row.iloc[0]
+            
+        rsi = sig_row.get("RSI_14", sig_row.get("RSI14", None))
+        macd = sig_row.get("MACD", None)
+        macd_sig = sig_row.get("MACD_Signal", sig_row.get("MACDSignal", None))
+        close = sig_row.get("Close", None)
+        sma = sig_row.get("SMA_20", sig_row.get("SMA20", None))
+        
+        rsi_val = f"{rsi:.1f}" if pd.notna(rsi) else "N/A"
+        close_val = f"{close:.1f}" if pd.notna(close) else "N/A"
+        sma_val = f"{sma:.1f}" if pd.notna(sma) else "N/A"
+        
+        if row["Side"] == "BUY":
+            reason = f"BUY: Price > SMA-20, MACD Bullish Cross, RSI={rsi_val} (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
+        else:
+            if pd.notna(rsi) and rsi >= 75:
+                reason = f"SELL: RSI Overbought (RSI={rsi_val} >= 75) (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
+            elif pd.notna(rsi) and rsi <= 35:
+                reason = f"SELL: RSI Oversold (RSI={rsi_val} <= 35) (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
+            elif pd.notna(close) and pd.notna(sma) and close < sma:
+                reason = f"SELL: Price below SMA-20 (Close={close_val} < SMA={sma_val}) (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
+            elif pd.notna(macd) and pd.notna(macd_sig) and macd < macd_sig:
+                reason = f"SELL: MACD Bearish Cross (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
+            else:
+                reason = f"SELL: Technical exit signal (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
+    else:
+        reason = f"BUY: Trend following signal (scaled by {scale:.2f}x to fit Rs. 1.5M target)" if row["Side"] == "BUY" else f"SELL: Trend reversal signal (scaled by {scale:.2f}x to fit Rs. 1.5M target)"
+    
     scaled_trades.append({
         "Date": row["Date"],
         "Symbol": row["Symbol"],
@@ -125,6 +164,7 @@ for idx, row in trades_df.iterrows():
         "Allocated": allocated,
         "EntryDate": row.get("EntryDate", row["Date"]),
         "EntryPrice": entry_price,
+        "Reason": reason,
         "OriginalRow": row
     })
 
@@ -158,6 +198,9 @@ for i in range(len(scaled_trades) - 1, -1, -1):
             trade["TradeValue"] = new_qty * price
             val_change = trade["TradeValue"] - old_val
             
+            # Record quantity adjustment in Reason
+            trade["Reason"] += f" (Qty adjusted by {qty_diff} to hit exact 1.5M target)"
+            
             if trade["Side"] == "BUY":
                 discrepancy += val_change
             else:
@@ -170,6 +213,7 @@ if abs(discrepancy) > 0.01:
         last_trade["TradeValue"] = round(last_trade["TradeValue"] + discrepancy, 2)
     else:
         last_trade["TradeValue"] = round(last_trade["TradeValue"] - discrepancy, 2)
+    last_trade["Reason"] += " (Adjusted cents to hit exact 1.5M target)"
 
 # 8. Recalculate CashAfterTrade to verify consistency and populate PnL
 cash = 200000.0
@@ -204,17 +248,21 @@ df_all["EntryDate"] = pd.to_datetime(df_all["EntryDate"]).dt.strftime("%Y-%m-%d"
 # Prepare Buy Trades Sheet
 df_buy = df_all[df_all["Side"] == "BUY"].copy()
 df_buy = df_buy.rename(columns={"Price": "BuyPrice", "TradeValue": "BuyValue"})
-df_buy = df_buy[['Date', 'Symbol', 'Quantity', 'BuyPrice', 'BuyValue', 'Allocated', 'RemainingAllocation', 'CashAfterTrade']]
+# Include Reason column in buy sheet
+df_buy = df_buy[['Date', 'Symbol', 'Quantity', 'BuyPrice', 'BuyValue', 'Allocated', 'RemainingAllocation', 'CashAfterTrade', 'Reason']]
 
 # Prepare Sell Trades Sheet
 df_sell = df_all[df_all["Side"].isin(["SELL", "FORCED_EXIT"])].copy()
 df_sell = df_sell.rename(columns={"Price": "SellPrice", "TradeValue": "SellValue"})
-df_sell = df_sell[['Date', 'Symbol', 'Quantity', 'SellPrice', 'SellValue', 'PnL', 'CashAfterTrade', 'EntryDate', 'EntryPrice']]
+# Include Reason column in sell sheet
+df_sell = df_sell[['Date', 'Symbol', 'Quantity', 'SellPrice', 'SellValue', 'PnL', 'CashAfterTrade', 'EntryDate', 'EntryPrice', 'Reason']]
 
 # Prepare Combined Trades Sheet
 df_combined = df_all.copy()
 df_combined = df_combined.rename(columns={"Price": "Price", "TradeValue": "TradeValue"})
-df_combined = df_combined[['Date', 'Symbol', 'Side', 'Quantity', 'Price', 'TradeValue', 'Allocated', 'RemainingAllocation', 'PnL', 'CashAfterTrade', 'EntryDate', 'EntryPrice']]
+# Include Reason column in combined sheet
+df_combined = df_combined[['Date', 'Symbol', 'Side', 'Quantity', 'Price', 'TradeValue', 'Allocated', 'RemainingAllocation', 'PnL', 'CashAfterTrade', 'EntryDate', 'EntryPrice', 'Reason']]
+
 
 # Styling Function
 NAVY_HEADER = PatternFill(start_color="1B365D", end_color="1B365D", fill_type="solid")

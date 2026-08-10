@@ -12,12 +12,12 @@ def get_path(filename):
     return os.path.join(EXCEL_DIR, filename)
 
 # 1. Load data
-trades_df = pd.read_excel(get_path("summary report.xlsx"), sheet_name="Trades")
+trades_df = pd.read_excel(get_path("trading_report.xlsx"), sheet_name="Trades")
 trades_df["Date"] = pd.to_datetime(trades_df["Date"])
 # Force stable chronological + alphabetical order
 trades_df = trades_df.sort_values(by=["Date", "Symbol"]).reset_index(drop=True)
 
-open_pos_df = pd.read_excel(get_path("summary report.xlsx"), sheet_name="OpenPositions")
+open_pos_df = pd.read_excel(get_path("trading_report.xlsx"), sheet_name="OpenPositions")
 last_date = trades_df["Date"].max()
 
 def run_master_sim(comp_factor):
@@ -43,7 +43,7 @@ def run_master_sim(comp_factor):
             # We target a specific quantity to ensure many positions can be filled
             target_qty = int((equity / 50.0) * comp_factor / price)
             target_qty = (target_qty // 10) * 10
-            if target_qty < 20: target_qty = 20
+            if target_qty < 10: target_qty = 10
 
             # Aggressive cash management: keep only 1,000 reserve for max trades
             available_for_buy = max(0, cash - 1000)
@@ -51,7 +51,7 @@ def run_master_sim(comp_factor):
                 target_qty = int(available_for_buy // price)
                 target_qty = (target_qty // 10) * 10
 
-            if target_qty >= 20:
+            if target_qty >= 10:
                 val = target_qty * price
                 cash -= val
                 inventory[symbol] = {'qty': target_qty, 'entry_p': price, 'date': row["Date"]}
@@ -130,10 +130,10 @@ df["PnL"] = np.where(df["Side"] == "SELL", df["TradeValue"] - (df["Quantity"] * 
 df_final = df[['Date', 'Symbol', 'Side', 'Quantity', 'Price', 'TradeValue', 'PnL', 'Cash', 'TotalValue', 'EntryDate', 'EntryPrice', 'Reason']].rename(columns={"Cash": "CashAfterTrade"})
 
 # Save Combined
-combined_out = get_path("projection_1.5m_trades_combined.xlsx")
-buy_out = get_path("projection_1.5m_buy.xlsx")
-sell_out = get_path("projection_1.5m_sell.xlsx")
-summary_out = get_path("projection_1.5m_summary.xlsx")
+combined_out = get_path("projection_1.5m_trades_combined.csv")
+buy_out = get_path("projection_1.5m_buy.csv")
+sell_out = get_path("projection_1.5m_sell.csv")
+summary_out = get_path("projection_1.5m_summary.csv")
 
 # Prepare Summary Data
 summary_data = pd.DataFrame([
@@ -144,41 +144,9 @@ summary_data = pd.DataFrame([
     {"Metric": "Sell Trades", "Value": len(df_final[df_final["Side"] == "SELL"])}
 ])
 
-with pd.ExcelWriter(combined_out) as w:
-    df_final.to_excel(w, index=False)
+df_final.to_csv(combined_out, index=False)
+df_final[df_final["Side"] == "BUY"].to_csv(buy_out, index=False)
+df_final[df_final["Side"] == "SELL"].to_csv(sell_out, index=False)
+summary_data.to_csv(summary_out, index=False)
 
-with pd.ExcelWriter(buy_out) as w:
-    df_final[df_final["Side"] == "BUY"].to_excel(w, index=False)
-
-with pd.ExcelWriter(sell_out) as w:
-    df_final[df_final["Side"] == "SELL"].to_excel(w, index=False)
-
-with pd.ExcelWriter(summary_out) as w:
-    summary_data.to_excel(w, index=False)
-
-# Styling
-for out_path in [combined_out, buy_out, sell_out, summary_out]:
-    wb = load_workbook(out_path)
-    ws = wb.active
-    navy = PatternFill(start_color="1B365D", end_color="1B365D", fill_type="solid")
-    font_h = Font(name="Segoe UI", size=10, bold=True, color="FFFFFF")
-
-    for col_idx in range(1, ws.max_column + 1):
-        cell = ws.cell(row=1, column=col_idx)
-        cell.font, cell.fill, cell.alignment = font_h, navy, Alignment(horizontal="center", vertical="center")
-
-    for r in range(2, ws.max_row + 1):
-        for c in range(1, ws.max_column + 1):
-            cell = ws.cell(row=r, column=c)
-            h = str(ws.cell(row=1, column=c).value).lower()
-            if isinstance(cell.value, (int, float)):
-                cell.number_format = '[$-en-IN]#,##,##,##0'
-                cell.alignment = Alignment(horizontal="right", vertical="center")
-            else:
-                cell.alignment = Alignment(horizontal="center" if h in ("symbol", "side", "date") else "left", vertical="center")
-
-    for col in ws.columns:
-        ws.column_dimensions[col[0].column_letter].width = 16
-    wb.save(out_path)
-
-print(f"Master Reports Ready! Files created in Excel_Files folder.")
+print(f"Master Reports Ready! CSV files created in Excel_Files folder.")

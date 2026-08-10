@@ -60,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-positions",
         type=int,
-        default=30,
+        default=50,
         help="Maximum number of open positions to hold at once.",
     )
     parser.add_argument(
@@ -221,9 +221,9 @@ def add_strategy_signals(data: pd.DataFrame, sma_window: int) -> pd.DataFrame:
         start_date = ordered["Date"].min()
         warmup_period = start_date + pd.Timedelta(days=90)
 
-        # Reverting to Bottom 10% range rule
+        # Reverting to Bottom 15% range rule
         range_val = rolling_max - rolling_min
-        buy_signal = (ordered["Close"] <= (rolling_min + 0.10 * range_val)) & (ordered["Date"] >= warmup_period)
+        buy_signal = (ordered["Close"] <= (rolling_min + 0.15 * range_val)) & (ordered["Date"] >= warmup_period)
 
         ordered["StrategySignal"] = 0
         ordered.loc[buy_signal, "StrategySignal"] = 1
@@ -250,9 +250,11 @@ def backtest(data: pd.DataFrame, initial_cash: float, max_positions: int) -> tup
             current_price = float(row.Open) if pd.notna(row.Open) else float(row.Close)
             position = positions[symbol]
             
-            if current_price >= position.entry_price + 5:
+            days_held = (date - position.entry_date).days
+            if current_price >= position.entry_price + 20 or days_held > 365:
                 positions.pop(symbol)
                 cash += position.quantity * current_price
+                reason = "SELL: Profit Target Reached (+Rs. 20)" if current_price >= position.entry_price + 20 else "SELL: Time-based Exit (1 Year)"
                 trade_rows.append(
                     {
                         "Date": date,
@@ -264,6 +266,7 @@ def backtest(data: pd.DataFrame, initial_cash: float, max_positions: int) -> tup
                         "CashAfterTrade": cash,
                         "EntryDate": position.entry_date,
                         "EntryPrice": position.entry_price,
+                        "Reason": reason
                     }
                 )
 
@@ -277,7 +280,8 @@ def backtest(data: pd.DataFrame, initial_cash: float, max_positions: int) -> tup
             slots_available = max(max_positions - len(positions), 0)
             selected_candidates = buy_candidates[:slots_available]
 
-            per_position_budget = float(initial_cash) / float(max_positions) if max_positions > 0 else float(initial_cash)
+            current_equity = cash + sum(p.quantity * day_prices.get(s, p.entry_price) for s, p in positions.items())
+            per_position_budget = current_equity / max_positions if max_positions > 0 else current_equity
             m = len(selected_candidates)
             if m > 0:
                 total_needed = per_position_budget * m
@@ -290,8 +294,7 @@ def backtest(data: pd.DataFrame, initial_cash: float, max_positions: int) -> tup
 
                     quantity = int(min(alloc, cash) // buy_price)
                     quantity = (quantity // 10) * 10
-                    if quantity < 20: continue
-                    if quantity > 50: quantity = 50
+                    if quantity < 10: continue
 
                     trade_value = quantity * buy_price
                     if trade_value > cash:
@@ -372,12 +375,18 @@ def build_sell_trades_df(trade_df: pd.DataFrame) -> pd.DataFrame:
     return sell_df[["Date", "Symbol", "Quantity", "SellPrice", "SellValue", "PnL", "CashAfterTrade", "EntryDate", "EntryPrice"]]
 
 def write_report(output_path: Path, summary_df: pd.DataFrame, trade_df: pd.DataFrame, equity_df: pd.DataFrame, holdings_df: pd.DataFrame) -> None:
+    # Save all components as separate CSV files
+    base = output_path.parent
+    trade_df.to_csv(base / "trading_report_all_trades.csv", index=False)
+    summary_df.to_csv(base / "trading_report_summary.csv", index=False)
+    equity_df.to_csv(base / "trading_report_equity_curve.csv", index=False)
+    holdings_df.to_csv(base / "trading_report_open_positions.csv", index=False)
+
     buy_df = build_buy_trades_df(trade_df)
     sell_df = build_sell_trades_df(trade_df)
-    combined_sheets = {"Summary": summary_df, "BuyTrades": buy_df, "SellTrades": sell_df, "Trades": trade_df, "EquityCurve": equity_df, "OpenPositions": holdings_df}
-    write_workbook(output_path, combined_sheets)
-    write_workbook(output_path.with_name(f"{output_path.stem}_buy.xlsx"), {"BuyTrades": buy_df})
-    write_workbook(output_path.with_name(f"{output_path.stem}_sell.xlsx"), {"SellTrades": sell_df})
+
+    buy_df.to_csv(base / "trading_report_buy.csv", index=False)
+    sell_df.to_csv(base / "trading_report_sell.csv", index=False)
 
 def main() -> None:
     args = parse_args()
